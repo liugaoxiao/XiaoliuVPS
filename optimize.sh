@@ -3,9 +3,6 @@
 # 用法: bash optimize.sh
 # GitHub: https://github.com/liugaoxiao/XiaoliuVPS
 
-set -euo pipefail
-
-# 颜色
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -17,21 +14,84 @@ _success() { echo -e "${GREEN}[成功] $1${NC}"; }
 _warn() { echo -e "${YELLOW}[注意] $1${NC}"; }
 _error() { echo -e "${RED}[错误] $1${NC}"; }
 
-# 检查 root
 if [[ $EUID -ne 0 ]]; then
     _error "请用 root 运行: sudo bash optimize.sh"
     exit 1
 fi
 
-SYSCTL_CONTENT='
+# 安装缺失的依赖
+_install_deps() {
+    local missing=""
+    command -v sysctl &>/dev/null || missing="procps"
+    command -v nft &>/dev/null || missing="$missing nftables"
+    if [ -n "$missing" ]; then
+        _info "安装缺失依赖:$missing"
+        if command -v apt-get &>/dev/null; then
+            apt-get update -qq >/dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive apt-get install -y $missing >/dev/null 2>&1
+        elif command -v yum &>/dev/null; then
+            yum install -y $missing >/dev/null 2>&1
+        elif command -v apk &>/dev/null; then
+            apk add --no-cache $missing >/dev/null 2>&1
+        fi
+    fi
+}
+
+# sysctl 参数写入并验证
+_apply_sysctl() {
+    local key="$1" val="$2"
+    sysctl -w "${key}=${val}" >/dev/null 2>&1
+}
+
+clear
+echo -e "${CYAN}"
+echo '  ╔═══════════════════════════════════════╗'
+echo '  ║         VPS 网络一键优化             ║'
+echo '  ║   Wyatt + netpilot + kejilion 整合    ║'
+echo '  ╚═══════════════════════════════════════╝'
+echo -e "${NC}"
+echo ""
+_info "系统: $(uname -s -r -m)"
+_info "CPU: $(nproc 2>/dev/null || echo '?') 核 | 内存: $(free -h 2>/dev/null | awk '/^Mem:/{print $2}' || echo '?')"
+_info "当前拥塞: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo cubic) / $(sysctl -n net.core.default_qdisc 2>/dev/null || echo pfifo_fast)"
+echo ""
+echo -e "${YELLOW}  执行内容:${NC} 依赖安装 + sysctl(33项) + 模块 + nofile + gai.conf + MSS Clamp + DDoS"
+echo ""
+read -p "  确认执行? (Y/n): " confirm
+[[ "$confirm" == "n" || "$confirm" == "N" ]] && echo "已取消" && exit 0
+
+old_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo cubic)
+
+# 0. 安装依赖
+echo ""
+_info "[0/7] 检查并安装依赖..."
+_install_deps
+_success "OK"
+
+# 1. sysctl - 备份并逐条写入
+echo ""
+_info "[1/7] sysctl 参数 (33项)..."
+[ -f /etc/sysctl.conf ] && cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%s)
+
+# 生成干净的 sysctl.conf
+cat > /etc/sysctl.conf << 'SYSCTLEOF'
+# VPS 网络优化 - 整合方案 (Wyatt + netpilot + kejilion)
+
+# 文件系统
 fs.file-max = 6815744
 fs.nr_open = 6815744
+
+# 连接队列
 net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_abort_on_overflow = 1
 net.core.netdev_max_backlog = 65536
+
+# BBR 拥塞控制
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
+
+# TCP 缓冲区 (64MB)
 net.core.rmem_max = 67108864
 net.core.wmem_max = 67108864
 net.core.rmem_default = 2097152
@@ -39,8 +99,12 @@ net.core.wmem_default = 2097152
 net.ipv4.tcp_rmem = 4096 87380 67108864
 net.ipv4.tcp_wmem = 4096 65536 67108864
 net.ipv4.tcp_moderate_rcvbuf = 1
+
+# UDP 缓冲区
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
+
+# TCP 连接优化
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = 1
@@ -59,6 +123,8 @@ net.ipv4.tcp_rfc1337 = 1
 net.ipv4.tcp_ecn = 0
 net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.ip_local_port_range = 1024 65535
+
+# 路由 & 转发
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.route_localnet = 1
 net.ipv4.conf.all.rp_filter = 0
@@ -72,6 +138,8 @@ net.ipv6.route.max_size = 1048576
 net.ipv6.neigh.default.gc_thresh1 = 1024
 net.ipv6.neigh.default.gc_thresh2 = 4096
 net.ipv6.neigh.default.gc_thresh3 = 8192
+
+# Conntrack 连接跟踪
 net.netfilter.nf_conntrack_max = 131072
 net.netfilter.nf_conntrack_tcp_timeout_established = 7200
 net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
@@ -79,57 +147,59 @@ net.netfilter.nf_conntrack_tcp_timeout_close_wait = 60
 net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
 net.netfilter.nf_conntrack_udp_timeout = 60
 net.netfilter.nf_conntrack_udp_timeout_stream = 180
+
+# RPS 多核分发
 net.core.rps_sock_flow_entries = 32768
+
+# 虚拟内存
 vm.swappiness = 10
 vm.overcommit_memory = 1
-'
+SYSCTLEOF
 
-clear
-echo -e "${CYAN}"
-echo '  ╔═══════════════════════════════════════╗'
-echo '  ║         VPS 网络一键优化             ║'
-echo '  ║   Wyatt + netpilot + kejilion 整合    ║'
-echo '  ╚═══════════════════════════════════════╝'
-echo -e "${NC}"
-echo ""
-_info "系统: $(uname -s -r -m)"
-_info "CPU: $(nproc 2>/dev/null || echo '?') 核 | 内存: $(free -h 2>/dev/null | awk '/^Mem:/{print $2}' || echo '?')"
-_info "当前拥塞: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) / $(sysctl -n net.core.default_qdisc 2>/dev/null)"
-echo ""
-echo -e "${YELLOW}  执行内容:${NC} sysctl(33项) + 模块加载 + nofile + gai.conf + MSS Clamp + DDoS"
-echo ""
-read -p "  确认执行? (Y/n): " confirm
-[[ "$confirm" == "n" || "$confirm" == "N" ]] && echo "已取消" && exit 0
-
-old_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo cubic)
-
-# 1. sysctl
-echo ""
-_info "[1/6] sysctl 参数..."
-[ -f /etc/sysctl.conf ] && cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%s)
-echo "$SYSCTL_CONTENT" > /etc/sysctl.conf
-sysctl -p >/dev/null 2>&1
-_success "33项参数已生效"
-
-# 2. 模块
-_info "[2/6] 内核模块..."
-modprobe tcp_bbr 2>/dev/null || true
+# 加载 conntrack 模块 (sysctl 需要)
 modprobe nf_conntrack 2>/dev/null || true
+modprobe tcp_bbr 2>/dev/null || true
+
+# 应用并捕获错误
+sysctl_output=$(sysctl -p 2>&1)
+sysctl_errors=$(echo "$sysctl_output" | grep -c 'error' || true)
+sysctl_ok=$(echo "$sysctl_output" | grep -c '=' || true)
+if [ "$sysctl_errors" -gt 0 ]; then
+    _warn "${sysctl_ok} 项生效, ${sysctl_errors} 项跳过(内核不支持)"
+else
+    _success "全部 ${sysctl_ok} 项参数已生效"
+fi
+
+# 2. 模块开机加载
+echo ""
+_info "[2/7] 内核模块开机加载..."
 mkdir -p /etc/modules-load.d
-printf 'tcp_bbr\nnf_conntrack\n' > /etc/modules-load.d/proxy-optimize.conf
-_success "BBR + conntrack 已加载"
+cat > /etc/modules-load.d/proxy-optimize.conf << 'EOF'
+tcp_bbr
+nf_conntrack
+EOF
+_success "BBR + conntrack"
 
 # 3. nofile
-_info "[3/6] 文件描述符..."
+echo ""
+_info "[3/7] 文件描述符..."
 if ! grep -q 'VPS-Optimize-nofile' /etc/security/limits.conf 2>/dev/null; then
-    printf '\n# VPS-Optimize-nofile\n* soft nofile 1048576\n* hard nofile 1048576\nroot soft nofile 1048576\nroot hard nofile 1048576\n' >> /etc/security/limits.conf
+    cat >> /etc/security/limits.conf << 'EOF'
+
+# VPS-Optimize-nofile
+* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+EOF
     _success "nofile 1048576"
 else
     _success "已配置，跳过"
 fi
 
 # 4. gai.conf
-_info "[4/6] IPv4 优先解析..."
+echo ""
+_info "[4/7] IPv4 优先解析..."
 if [ -f /etc/gai.conf ]; then
     grep -q 'ffff:0:0' /etc/gai.conf 2>/dev/null || echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
 else
@@ -138,12 +208,13 @@ fi
 _success "OK"
 
 # 5. MSS Clamp
-_info "[5/6] MSS Clamp (nftables)..."
+echo ""
+_info "[5/7] MSS Clamp (nftables)..."
 if command -v nft &>/dev/null; then
     nft list table inet vps_optimize >/dev/null 2>&1 || nft add table inet vps_optimize
     nft list chain inet vps_optimize mangle_forward >/dev/null 2>&1 || nft add chain inet vps_optimize mangle_forward '{ type filter hook forward priority -150; policy accept; }'
     nft flush chain inet vps_optimize mangle_forward 2>/dev/null
-    nft add rule inet vps_optimize mangle_forward tcp flags syn tcp option maxseg size set rt mtu comment MSS-Clamp
+    nft add rule inet vps_optimize mangle_forward tcp flags syn tcp option maxseg size set rt mtu comment MSS-Clamp 2>/dev/null
     mkdir -p /etc/nftables.d
     nft list table inet vps_optimize > /etc/nftables.d/vps_optimize.nft 2>/dev/null
     if [ -f /etc/nftables.conf ] && ! grep -q 'vps_optimize' /etc/nftables.conf 2>/dev/null; then
@@ -151,34 +222,57 @@ if command -v nft &>/dev/null; then
     fi
     _success "MSS Clamp 已生效"
 else
-    _warn "nft 不可用，跳过"
+    _warn "nftables 安装失败，跳过"
 fi
 
 # 6. DDoS
-_info "[6/6] DDoS 防护..."
+echo ""
+_info "[6/7] DDoS 防护..."
 if command -v nft &>/dev/null; then
     nft list chain inet vps_optimize dos_input >/dev/null 2>&1 || nft add chain inet vps_optimize dos_input '{ type filter hook input priority -150; policy accept; }'
     nft flush chain inet vps_optimize dos_input 2>/dev/null
-    nft add rule inet vps_optimize dos_input tcp flags syn tcp dport != 22 meter syn_flood '{ size 65536, flags dynamic, timeout 10s }' limit rate over 200/second burst 50 packets drop comment DDoS-SYN
-    nft add rule inet vps_optimize dos_input udp meter udp_flood '{ size 65536, flags dynamic, timeout 10s }' limit rate over 500/second burst 100 packets drop comment DDoS-UDP
-    nft add rule inet vps_optimize dos_input icmp type echo-request limit rate over 50/second burst 20 packets drop comment DDoS-ICMP
-    nft add rule inet vps_optimize dos_input tcp flags & fin == 0 tcp flags & syn == 0 tcp flags & rst == 0 drop comment DDoS-Invalid
+    nft add rule inet vps_optimize dos_input tcp flags syn tcp dport != 22 meter syn_flood '{ size 65536, flags dynamic, timeout 10s }' limit rate over 200/second burst 50 packets drop comment DDoS-SYN 2>/dev/null
+    nft add rule inet vps_optimize dos_input udp meter udp_flood '{ size 65536, flags dynamic, timeout 10s }' limit rate over 500/second burst 100 packets drop comment DDoS-UDP 2>/dev/null
+    nft add rule inet vps_optimize dos_input icmp type echo-request limit rate over 50/second burst 20 packets drop comment DDoS-ICMP 2>/dev/null
+    nft add rule inet vps_optimize dos_input tcp flags & fin == 0 tcp flags & syn == 0 tcp flags & rst == 0 drop comment DDoS-Invalid 2>/dev/null
     nft list table inet vps_optimize > /etc/nftables.d/vps_optimize.nft 2>/dev/null
     _success "DDoS 防护已生效"
 else
-    _warn "nft 不可用，跳过"
+    _warn "nftables 不可用，跳过"
 fi
 
-# 验证
+# 7. 验证
 echo ""
 echo -e "${GREEN}══════════════ 优化完成 ══════════════${NC}"
-echo -e "  BBR:       ${old_bbr} → ${GREEN}$(sysctl -n net.ipv4.tcp_congestion_control)${NC}"
-echo -e "  qdisc:     ${GREEN}$(sysctl -n net.core.default_qdisc)${NC}"
-echo -e "  somaxconn: ${GREEN}$(sysctl -n net.core.somaxconn)${NC}"
-echo -e "  rmem_max:  ${GREEN}$(($(sysctl -n net.core.rmem_max) / 1048576)) MB${NC}"
-echo -e "  file-max:  ${GREEN}$(sysctl -n fs.file-max)${NC}"
-echo -e "  fin_time:  ${GREEN}$(sysctl -n net.ipv4.tcp_fin_timeout)s${NC}"
-echo -e "  swappiness:${GREEN} $(sysctl -n vm.swappiness)${NC}"
-echo -e "  conntrack: ${GREEN}$(sysctl -n net.netfilter.nf_conntrack_max)${NC}"
+
+# 安全读取 sysctl 值
+_get_sysctl() {
+    local val=$(sysctl -n "$1" 2>/dev/null)
+    echo "${val:-N/A}"
+}
+
+new_bbr=$(_get_sysctl net.ipv4.tcp_congestion_control)
+qdisc=$(_get_sysctl net.core.default_qdisc)
+somaxconn=$(_get_sysctl net.core.somaxconn)
+rmem=$(_get_sysctl net.core.rmem_max)
+filemax=$(_get_sysctl fs.file-max)
+fintime=$(_get_sysctl net.ipv4.tcp_fin_timeout)
+swapp=$(_get_sysctl vm.swappiness)
+conntrack=$(_get_sysctl net.netfilter.nf_conntrack_max)
+
+# 安全计算 MB
+if [[ "$rmem" =~ ^[0-9]+$ ]]; then
+    rmem_mb=$((rmem / 1048576))
+else
+    rmem_mb="$rmem"
+fi
+
+echo -e "  BBR:       ${old_bbr} → ${GREEN}${new_bbr}${NC}"
+echo -e "  qdisc:     ${GREEN}${qdisc}${NC}"
+echo -e "  somaxconn: ${GREEN}${somaxconn}${NC}"
+echo -e "  rmem_max:  ${GREEN}${rmem_mb} MB${NC}"
+echo -e "  file-max:  ${GREEN}${filemax}${NC}"
+echo -e "  fin_time:  ${GREEN}${fintime}s${NC}"
+echo -e "  swappiness:${GREEN} ${swapp}${NC}"
+echo -e "  conntrack: ${GREEN}${conntrack}${NC}"
 echo -e "${GREEN}═══════════════════════════════════════${NC}"
-rm -f /tmp/vps_opt.sh 2>/dev/null
