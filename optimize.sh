@@ -56,7 +56,7 @@ _info "CPU: $(nproc 2>/dev/null || echo '?') 核 | 内存: $(free -h 2>/dev/null
 _info "当前拥塞: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo cubic) / $(sysctl -n net.core.default_qdisc 2>/dev/null || echo pfifo_fast)"
 echo ""
 echo -e "${YELLOW}  执行内容:${NC}"
-echo -e "    网络优化: sysctl(28项) + BBR + conntrack + nofile + gai.conf"
+echo -e "    网络优化: sysctl(38项) + BBR + conntrack + nofile + gai.conf"
 echo -e "    安全隐匿: ICMP隐藏 + TCP防指纹 + 内核加固 + DDoS防护"
 echo -e "    防火墙:   MSS Clamp + 端口扫描拦截 + SSH速率限制"
 echo ""
@@ -226,7 +226,7 @@ else
 fi
 _success "OK"
 
-# 5. MSS Clamp + 安全防火墙
+# 5. 防火墙规则 (MSS Clamp + DDoS + 隐匿)
 echo ""
 _info "[5/8] 防火墙规则 (MSS Clamp + DDoS + 隐匿)..."
 if command -v nft &>/dev/null; then
@@ -239,16 +239,16 @@ if command -v nft &>/dev/null; then
     nft add rule inet vps_optimize mangle_forward tcp flags syn tcp option maxseg size set rt mtu comment MSS-Clamp 2>/dev/null
     _success "MSS Clamp 已生效"
 
-    # --- DDoS + 隐匿 (input chain) ---
+    # --- DDoS + 隐匿 (input chain, policy=accept) ---
     nft list chain inet vps_optimize dos_input >/dev/null 2>&1 || nft add chain inet vps_optimize dos_input '{ type filter hook input priority -150; policy accept; }'
     nft flush chain inet vps_optimize dos_input 2>/dev/null
 
+    # 优先放行已建立连接 (Emby 视频流等长连接不受影响)
+    nft add rule inet vps_optimize dos_input ct state established,related accept comment Accept-Established 2>/dev/null
+    # 放行 loopback
+    nft add rule inet vps_optimize dos_input iif lo accept comment Accept-Loopback 2>/dev/null
     # 丢弃无效连接状态
     nft add rule inet vps_optimize dos_input ct state invalid drop comment Drop-Invalid 2>/dev/null
-    # 允许已建立连接（性能优化，直接放行）
-    nft add rule inet vps_optimize dos_input ct state established,related accept comment Accept-Established 2>/dev/null
-    # 允许 loopback
-    nft add rule inet vps_optimize dos_input iif lo accept comment Accept-Loopback 2>/dev/null
     # 丢弃异常 TCP 标志 (XMAS/SYN-RST 扫描)
     nft add rule inet vps_optimize dos_input tcp flags syn,fin syn,fin drop comment Block-XMAS 2>/dev/null
     nft add rule inet vps_optimize dos_input tcp flags syn,rst syn,rst drop comment Block-SYNRST 2>/dev/null
@@ -258,12 +258,8 @@ if command -v nft &>/dev/null; then
     nft add rule inet vps_optimize dos_input tcp dport 22 ct state new meter ssh_bruteforce '{ size 65536, flags dynamic, timeout 60s }' limit rate over 4/minute burst 4 packets drop comment SSH-RateLimit 2>/dev/null
     # UDP 洪水防护
     nft add rule inet vps_optimize dos_input udp meter udp_flood '{ size 65536, flags dynamic, timeout 10s }' limit rate over 500/second burst 100 packets drop comment DDoS-UDP 2>/dev/null
-    # ICMP 限制 (已通过 sysctl 关闭回复，这里是备份)
+    # ICMP 限制
     nft add rule inet vps_optimize dos_input icmp type echo-request limit rate over 5/second burst 5 packets drop comment ICMP-Limit 2>/dev/null
-    # 新连接速率限制 (每秒最多 200 个新连接)
-    nft add rule inet vps_optimize dos_input ct state new meter conn_rate '{ size 65536, flags dynamic, timeout 1m }' limit rate over 200/second burst 100 packets drop comment ConnRate-Limit 2>/dev/null
-    # 丢弃分片包 (常用于碎片攻击)
-    nft add rule inet vps_optimize dos_input ip frag-off > 0 drop comment Drop-Fragments 2>/dev/null
 
     # 保存规则
     mkdir -p /etc/nftables.d
@@ -282,29 +278,19 @@ _info "[6/8] SSH 安全加固..."
 SSH_CONF="/etc/ssh/sshd_config"
 if [ -f "$SSH_CONF" ]; then
     sshd_changed=false
-    # 禁止空密码
     if ! grep -qE '^\s*PermitEmptyPasswords\s+no' "$SSH_CONF" 2>/dev/null; then
         echo 'PermitEmptyPasswords no' >> "$SSH_CONF"
         sshd_changed=true
     fi
-    # 限制最大认证尝试次数
     if ! grep -qE '^\s*MaxAuthTries\s+' "$SSH_CONF" 2>/dev/null; then
         echo 'MaxAuthTries 3' >> "$SSH_CONF"
         sshd_changed=true
     fi
-    # 禁用 X11 转发 (代理不需要)
     if ! grep -qE '^\s*X11Forwarding\s+no' "$SSH_CONF" 2>/dev/null; then
         echo 'X11Forwarding no' >> "$SSH_CONF"
         sshd_changed=true
     fi
-    # 禁用 TCP 转发 (按需，代理不需要 SSH 隧道)
-    # 注: 如果用户需要 SSH 隧道代理，可注释掉以下两行
-    if ! grep -qE '^\s*AllowTcpForwarding\s+no' "$SSH_CONF" 2>/dev/null; then
-        echo 'AllowTcpForwarding no' >> "$SSH_CONF"
-        sshd_changed=true
-    fi
     if [ "$sshd_changed" = true ]; then
-        # 检测 sshd 重启方式
         if command -v systemctl &>/dev/null && systemctl is-active sshd >/dev/null 2>&1; then
             systemctl reload sshd 2>/dev/null || systemctl restart sshd 2>/dev/null
         elif command -v systemctl &>/dev/null && systemctl is-active ssh >/dev/null 2>&1; then
@@ -312,7 +298,7 @@ if [ -f "$SSH_CONF" ]; then
         elif command -v rc-service &>/dev/null; then
             rc-service sshd reload 2>/dev/null || rc-service sshd restart 2>/dev/null
         fi
-        _success "SSH 加固已生效 (MaxAuthTries=3, 禁空密码/禁X11/禁TCP转发)"
+        _success "SSH 加固已生效 (MaxAuthTries=3, 禁空密码, 禁X11)"
     else
         _success "SSH 已配置，跳过"
     fi
@@ -320,15 +306,16 @@ else
     _warn "sshd_config 不存在，跳过"
 fi
 
-# 7. 隐藏常见服务 banner
+# 7. 隐藏服务 Banner
 echo ""
 _info "[7/8] 隐藏服务 Banner..."
-# SSH banner
-if [ -f "$SSH_CONF" ] && ! grep -qE '^\s*Banner\s+none' "$SSH_CONF" 2>/dev/null; then
-    echo 'Banner none' >> "$SSH_CONF"
-fi
-if [ -f "$SSH_CONF" ] && ! grep -qE '^\s*DebianBanner\s+no' "$SSH_CONF" 2>/dev/null; then
-    echo 'DebianBanner no' >> "$SSH_CONF" 2>/dev/null
+if [ -f "$SSH_CONF" ]; then
+    if ! grep -qE '^\s*Banner\s+none' "$SSH_CONF" 2>/dev/null; then
+        echo 'Banner none' >> "$SSH_CONF"
+    fi
+    if ! grep -qE '^\s*DebianBanner\s+no' "$SSH_CONF" 2>/dev/null; then
+        echo 'DebianBanner no' >> "$SSH_CONF" 2>/dev/null
+    fi
 fi
 _success "SSH Banner 已隐藏"
 
