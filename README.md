@@ -10,20 +10,20 @@ curl -LfsS https://raw.githubusercontent.com/liugaoxiao/XiaoliuVPS/main/optimize
 
 ## 优化内容
 
-### sysctl 参数 (33项)
+### sysctl 参数 (35项)
 - **BBR 拥塞控制** — tcp_congestion_control=bbr, qdisc=fq
 - **TCP 缓冲区** — rmem/wmem 64MB
 - **连接队列** — somaxconn=65535, tcp_max_syn_backlog=16384
 - **TCP 快速恢复** — tcp_fastopen=3, tcp_fin_timeout=15s, tcp_tw_reuse=1
-- **连接跟踪** — nf_conntrack_max=131072
+- **连接跟踪** — nf_conntrack_max=131072, 含 last_ack 优化
 - **文件描述符** — file-max=6815744
 - **IPv4/IPv6 转发** — 支持代理/隧道
 - **虚拟内存** — swappiness=10, overcommit_memory=1
 
 ### 非 sysctl 操作
 - **MSS Clamp** — nftables 自动设置 MSS MTU
-- **DDoS 防护** — SYN/UDP/ICMP 速率限制
-- **文件描述符限制** — limits.conf nofile 1048576
+- **DDoS 防护** — SYN/UDP/ICMP 速率限制 + XMAS/SYN-RST 扫描拦截
+- **文件描述符限制** — limits.conf + systemd DefaultLimitNOFILE
 - **IPv4 优先解析** — gai.conf precedence
 - **内核模块** — tcp_bbr + nf_conntrack 开机加载
 - **依赖安装** — 自动安装 nftables 等缺失依赖
