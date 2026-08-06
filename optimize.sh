@@ -155,7 +155,7 @@ _restore_all() {
         local sshd="/etc/ssh/sshd_config"
         if [ -f "$sshd" ]; then
             sed -i '/^PermitEmptyPasswords no$/d' "$sshd"
-            sed -i '/^MaxAuthTries 3$/d' "$sshd"
+            sed -i '/^MaxAuthTries [0-9]*$/d' "$sshd"
             sed -i '/^X11Forwarding no$/d' "$sshd"
             sed -i '/^Banner \/dev\/null$/d' "$sshd"
             sed -i '/^Banner none$/d' "$sshd"
@@ -293,8 +293,8 @@ net.ipv4.tcp_ecn = 0
 net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.ip_local_port_range = 1024 65535
 
-# ═══ TCP Keepalive (600s 探测, 30s 间隔, 3次断开) ═══
-net.ipv4.tcp_keepalive_time = 600
+# ═══ TCP Keepalive (1800s 探测, 30s 间隔, 3次断开) ═══
+net.ipv4.tcp_keepalive_time = 1800
 net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 3
 
@@ -332,7 +332,7 @@ net.netfilter.nf_conntrack_udp_timeout_stream = 180
 
 # ═══ 虚拟内存 ═══
 vm.swappiness = 10
-vm.overcommit_memory = 1
+vm.overcommit_memory = 0
 SYSCTLEOF
 
     # 加载内核模块
@@ -410,7 +410,7 @@ EOF
         nft list chain inet vps_optimize dos_input >/dev/null 2>&1 || nft add chain inet vps_optimize dos_input '{ type filter hook input priority -150; policy accept; }'
         nft flush chain inet vps_optimize dos_input 2>/dev/null
 
-        # 优先放行已建立连接 (Emby 视频流等长连接不受影响)
+        # 优先放行已建立连接 (所有已有会话不受影响)
         nft add rule inet vps_optimize dos_input ct state established,related accept comment Accept-Established 2>/dev/null
         # 放行 loopback
         nft add rule inet vps_optimize dos_input iif lo accept comment Accept-Loopback 2>/dev/null
@@ -420,9 +420,9 @@ EOF
         nft add rule inet vps_optimize dos_input tcp flags syn,fin syn,fin drop comment Block-XMAS 2>/dev/null
         nft add rule inet vps_optimize dos_input tcp flags syn,rst syn,rst drop comment Block-SYNRST 2>/dev/null
         # SYN 洪水防护 (保护 SSH)
-        nft add rule inet vps_optimize dos_input tcp flags syn tcp dport != 22 meter syn_flood '{ size 65536, flags dynamic, timeout 10s }' limit rate over 200/second burst 50 packets drop comment DDoS-SYN 2>/dev/null
-        # SSH 速率限制: 每 IP 每分钟最多 4 次新连接
-        nft add rule inet vps_optimize dos_input tcp dport 22 ct state new meter ssh_bruteforce '{ size 65536, flags dynamic, timeout 60s }' limit rate over 4/minute burst 4 packets drop comment SSH-RateLimit 2>/dev/null
+        nft add rule inet vps_optimize dos_input tcp flags syn tcp dport != 22 meter syn_flood '{ size 65536, flags dynamic, timeout 10s }' limit rate over 500/second burst 100 packets drop comment DDoS-SYN 2>/dev/null
+        # SSH 速率限制: 每 IP 每分钟最多 10 次新连接
+        nft add rule inet vps_optimize dos_input tcp dport 22 ct state new meter ssh_bruteforce '{ size 65536, flags dynamic, timeout 60s }' limit rate over 10/minute burst 10 packets drop comment SSH-RateLimit 2>/dev/null
         # UDP 洪水防护
         nft add rule inet vps_optimize dos_input udp meter udp_flood '{ size 65536, flags dynamic, timeout 10s }' limit rate over 500/second burst 100 packets drop comment DDoS-UDP 2>/dev/null
         # ICMP 限制
@@ -450,7 +450,7 @@ EOF
             sshd_changed=true
         fi
         if ! grep -qE '^\s*MaxAuthTries\s+' "$SSH_CONF" 2>/dev/null; then
-            echo 'MaxAuthTries 3' >> "$SSH_CONF"
+            echo 'MaxAuthTries 5' >> "$SSH_CONF"
             sshd_changed=true
         fi
         if ! grep -qE '^\s*X11Forwarding\s+no' "$SSH_CONF" 2>/dev/null; then
@@ -475,7 +475,7 @@ EOF
                 elif command -v rc-service &>/dev/null; then
                     rc-service sshd reload 2>/dev/null || rc-service sshd restart 2>/dev/null
                 fi
-                _success "SSH 加固已生效 (MaxAuthTries=3, 禁空密码, 禁X11, Banner隐藏)"
+                _success "SSH 加固已生效 (MaxAuthTries=5, 禁空密码, 禁X11, Banner隐藏)"
             else
                 _error "sshd 配置语法检查失败! 已跳过重载，请手动检查 $SSH_CONF"
             fi
@@ -525,7 +525,7 @@ EOF
     echo -e "  ICMP隐藏:  ${GREEN}$([ "$icmp_ignore" = "1" ] && echo '已开启' || echo '未开启')${NC}"
     echo -e "  内核指针:  ${GREEN}$([ "$kptr" = "2" ] && echo '已隐藏' || echo '未隐藏')${NC}"
     echo -e "  DDoS防护:  ${GREEN}已开启${NC}"
-    echo -e "  SSH限速:   ${GREEN}4次/分钟${NC}"
+    echo -e "  SSH限速:   ${GREEN}10次/分钟${NC}"
     echo -e "${GREEN}═══════════════════════════════════════${NC}"
 }
 
