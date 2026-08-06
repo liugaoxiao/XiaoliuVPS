@@ -56,7 +56,7 @@ _info "系统: $(uname -s -r -m)"
 _info "CPU: $(nproc 2>/dev/null || echo '?') 核 | 内存: $(free -h 2>/dev/null | awk '/^Mem:/{print $2}' || echo '?')"
 _info "当前拥塞: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo cubic) / $(sysctl -n net.core.default_qdisc 2>/dev/null || echo pfifo_fast)"
 echo ""
-echo -e "${YELLOW}  执行内容:${NC} 依赖安装 + sysctl(35项) + 模块 + nofile + gai.conf + MSS Clamp + DDoS"
+echo -e "${YELLOW}  执行内容:${NC} 依赖安装 + sysctl(28项) + 模块 + nofile + gai.conf + MSS Clamp + DDoS"
 echo ""
 read -p "  确认执行? (Y/n): " confirm
 [[ "$confirm" == "n" || "$confirm" == "N" ]] && echo "已取消" && exit 0
@@ -71,12 +71,13 @@ _success "OK"
 
 # 1. sysctl - 备份并写入
 echo ""
-_info "[1/7] sysctl 参数 (35项)..."
+_info "[1/7] sysctl 参数 (28项)..."
 [ -f /etc/sysctl.conf ] && cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%s)
 
 # 生成干净的 sysctl.conf
 cat > /etc/sysctl.conf << 'SYSCTLEOF'
 # VPS 网络优化 - 整合方案 (Wyatt + netpilot + kejilion)
+# 仅保留对代理/隧道 VPS 真实有效的参数
 
 # 文件系统
 fs.file-max = 6815744
@@ -85,7 +86,7 @@ fs.nr_open = 6815744
 # 连接队列
 net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 16384
-net.ipv4.tcp_abort_on_overflow = 1
+net.ipv4.tcp_abort_on_overflow = 0
 net.core.netdev_max_backlog = 65536
 
 # BBR 拥塞控制
@@ -118,27 +119,16 @@ net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_sack = 1
-net.ipv4.tcp_fack = 1
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_rfc1337 = 1
 net.ipv4.tcp_ecn = 0
 net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.ip_local_port_range = 1024 65535
 
-# 路由 & 转发
-net.ipv4.ip_forward = 1
-net.ipv4.conf.all.route_localnet = 1
-net.ipv4.conf.all.rp_filter = 0
-net.ipv4.conf.default.rp_filter = 0
-net.ipv6.conf.all.disable_ipv6 = 0
-net.ipv6.conf.default.disable_ipv6 = 0
-net.ipv6.conf.lo.disable_ipv6 = 0
-net.ipv6.conf.all.forwarding = 1
-net.ipv6.conf.default.forwarding = 1
-net.ipv6.route.max_size = 1048576
-net.ipv6.neigh.default.gc_thresh1 = 1024
-net.ipv6.neigh.default.gc_thresh2 = 4096
-net.ipv6.neigh.default.gc_thresh3 = 8192
+# TCP Keepalive (600s 后探测, 30s 间隔, 3次失败断开)
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 3
 
 # Conntrack 连接跟踪
 net.netfilter.nf_conntrack_max = 131072
@@ -149,9 +139,6 @@ net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
 net.netfilter.nf_conntrack_tcp_timeout_last_ack = 30
 net.netfilter.nf_conntrack_udp_timeout = 60
 net.netfilter.nf_conntrack_udp_timeout_stream = 180
-
-# RPS 多核分发
-net.core.rps_sock_flow_entries = 32768
 
 # 虚拟内存
 vm.swappiness = 10
