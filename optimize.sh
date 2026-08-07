@@ -46,8 +46,8 @@ _detect_hardware() {
     [ "$NETDEV_BACKLOG" -lt 65536 ] && NETDEV_BACKLOG=65536
     [ "$NETDEV_BACKLOG" -gt 524288 ] && NETDEV_BACKLOG=524288
 
-    # TCP 缓冲区: >=2G 内存用 64MB, 否则 32MB
-    if [ "$RAM_MB" -ge 2048 ]; then
+    # TCP 缓冲区: >=1.5G 内存用 64MB, 否则 32MB
+    if [ "$RAM_MB" -ge 1536 ]; then
         TCP_BUF_MAX=67108864
         TCP_BUF_RMEM="4096 87380 67108864"
         TCP_BUF_WMEM="4096 65536 67108864"
