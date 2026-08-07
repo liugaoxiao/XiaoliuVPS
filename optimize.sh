@@ -608,13 +608,14 @@ echo -e "  ${CYAN}请选择操作:${NC}"
 echo ""
 echo -e "    ${GREEN}1${NC}) 一键优化 (网络 + 安全 + 防火墙)"
 echo -e "    ${RED}2${NC}) 恢复默认 (撤销所有优化)"
+echo -e "    ${YELLOW}3${NC}) 重启 VPS"
 echo ""
 echo -e "  ${YELLOW}优化内容:${NC}"
 echo -e "    网络优化: sysctl(42项+动态) + BBR + conntrack + nofile + gai.conf"
 echo -e "    安全隐匿: ICMP隐藏 + TCP防指纹 + 内核加固 + DDoS防护"
 echo -e "    防火墙:   MSS Clamp + 端口扫描拦截 + SSH速率限制"
 echo ""
-read -p "  输入选项 [1/2]: " choice < /dev/tty
+read -p "  输入选项 [1/2/3]: " choice < /dev/tty
 
 case "$choice" in
     1)
@@ -624,6 +625,17 @@ case "$choice" in
         ;;
     2)
         _restore_all
+        ;;
+    3)
+        echo ""
+        read -p "  确认重启 VPS? (y/N): " reboot_confirm < /dev/tty
+        if [[ "$reboot_confirm" == "y" || "$reboot_confirm" == "Y" ]]; then
+            _info "3 秒后重启..."
+            sleep 3
+            reboot
+        else
+            echo "已取消"
+        fi
         ;;
     *)
         _error "无效选项: $choice"
