@@ -223,6 +223,8 @@ _restore_all() {
         fi
     fi
     rm -f /etc/systemd/system.conf.d/nofile.conf 2>/dev/null
+    rm -f /etc/udev/rules.d/99-txqueuelen.rules 2>/dev/null
+    udevadm control --reload-rules 2>/dev/null || true
     systemctl daemon-reexec 2>/dev/null || true
     _success "systemd nofile 已清除"
 
@@ -390,6 +392,12 @@ SYSCTLEOF
     for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep -v lo); do
         ip link set "$iface" txqueuelen 10000 2>/dev/null || true
     done
+
+    # 持久化 txqueuelen (重启后生效)
+    cat > /etc/udev/rules.d/99-txqueuelen.rules << 'EOF'
+ACTION=="add", SUBSYSTEM=="net", RUN+="/sbin/ip link set $name txqueuelen 10000"
+EOF
+    udevadm control --reload-rules 2>/dev/null || true
 
     # 应用并统计结果
     sysctl_output=$(sysctl -p 2>&1)
@@ -602,7 +610,7 @@ echo -e "    ${GREEN}1${NC}) 一键优化 (网络 + 安全 + 防火墙)"
 echo -e "    ${RED}2${NC}) 恢复默认 (撤销所有优化)"
 echo ""
 echo -e "  ${YELLOW}优化内容:${NC}"
-echo -e "    网络优化: sysctl(38项) + BBR + conntrack + nofile + gai.conf"
+echo -e "    网络优化: sysctl(42项+动态) + BBR + conntrack + nofile + gai.conf"
 echo -e "    安全隐匿: ICMP隐藏 + TCP防指纹 + 内核加固 + DDoS防护"
 echo -e "    防火墙:   MSS Clamp + 端口扫描拦截 + SSH速率限制"
 echo ""
