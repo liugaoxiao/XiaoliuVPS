@@ -23,6 +23,45 @@ fi
 BACKUP_DIR="/var/lib/vps-optimize-backup"
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 
+# ═══════════════════════════════════════
+# 硬件检测 - 动态计算最优参数
+# ═══════════════════════════════════════
+_detect_hardware() {
+    CPU_CORES=$(nproc 2>/dev/null || echo 1)
+    RAM_KB=$(grep -i '^MemTotal:' /proc/meminfo 2>/dev/null | awk '{print $2}')
+    RAM_MB=$(( ${RAM_KB:-262144} / 1024 ))
+
+    # 文件描述符: 内存*512, 最小1M, 最大16M
+    FILE_MAX=$((RAM_MB * 512))
+    [ "$FILE_MAX" -lt 1048576 ] && FILE_MAX=1048576
+    [ "$FILE_MAX" -gt 16777216 ] && FILE_MAX=16777216
+
+    # conntrack: 内存*64, 最小32K, 最大512K
+    CONNTRACK_MAX=$((RAM_MB * 64))
+    [ "$CONNTRACK_MAX" -lt 32768 ] && CONNTRACK_MAX=32768
+    [ "$CONNTRACK_MAX" -gt 524288 ] && CONNTRACK_MAX=524288
+
+    # 网卡收包队列: 核数*65536, 最小64K, 最大512K
+    NETDEV_BACKLOG=$((CPU_CORES * 65536))
+    [ "$NETDEV_BACKLOG" -lt 65536 ] && NETDEV_BACKLOG=65536
+    [ "$NETDEV_BACKLOG" -gt 524288 ] && NETDEV_BACKLOG=524288
+
+    # TCP 缓冲区: >=2G 内存用 64MB, 否则 32MB
+    if [ "$RAM_MB" -ge 2048 ]; then
+        TCP_BUF_MAX=67108864
+        TCP_BUF_RMEM="4096 87380 67108864"
+        TCP_BUF_WMEM="4096 65536 67108864"
+        UDP_BUF_MIN=16384
+    else
+        TCP_BUF_MAX=33554432
+        TCP_BUF_RMEM="4096 87380 33554432"
+        TCP_BUF_WMEM="4096 65536 33554432"
+        UDP_BUF_MIN=8192
+    fi
+
+    _info "检测到: ${CPU_CORES}核 CPU, ${RAM_MB}MB 内存"
+}
+
 # 安装缺失的依赖
 _install_deps() {
     local missing=""
@@ -111,7 +150,7 @@ _restore_all() {
     else
         # 无备份时：逐个移除脚本设置的参数
         if [ -f /etc/sysctl.conf ]; then
-            for key in fs.file-max fs.nr_open net.core.somaxconn net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_abort_on_overflow net.core.netdev_max_backlog net.core.default_qdisc net.ipv4.tcp_congestion_control net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_moderate_rcvbuf net.ipv4.udp_rmem_min net.ipv4.udp_wmem_min net.ipv4.tcp_fastopen net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_timestamps net.ipv4.tcp_tw_reuse net.ipv4.tcp_fin_timeout net.ipv4.tcp_retries2 net.ipv4.tcp_max_orphans net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_syncookies net.ipv4.tcp_notsent_lowat net.ipv4.tcp_sack net.ipv4.tcp_mtu_probing net.ipv4.tcp_rfc1337 net.ipv4.tcp_ecn net.ipv4.tcp_no_metrics_save net.ipv4.ip_local_port_range net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_keepalive_probes net.ipv4.icmp_echo_ignore_all net.ipv4.icmp_echo_ignore_broadcasts net.ipv4.icmp_ratelimit net.ipv4.icmp_msgs_per_sec net.ipv4.conf.all.accept_redirects net.ipv4.conf.default.accept_redirects net.ipv4.conf.all.send_redirects net.ipv4.conf.default.send_redirects net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter kernel.kptr_restrict kernel.dmesg_restrict net.ipv4.conf.all.log_martians net.ipv4.conf.default.log_martians net.netfilter.nf_conntrack_max net.netfilter.nf_conntrack_tcp_timeout_established net.netfilter.nf_conntrack_tcp_timeout_time_wait net.netfilter.nf_conntrack_tcp_timeout_close_wait net.netfilter.nf_conntrack_tcp_timeout_fin_wait net.netfilter.nf_conntrack_tcp_timeout_last_ack net.netfilter.nf_conntrack_udp_timeout net.netfilter.nf_conntrack_udp_timeout_stream vm.swappiness vm.overcommit_memory; do
+            for key in fs.file-max fs.nr_open net.core.somaxconn net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_abort_on_overflow net.core.netdev_max_backlog net.core.busy_read net.core.busy_poll net.core.netdev_budget net.core.netdev_budget_usecs net.core.default_qdisc net.ipv4.tcp_congestion_control net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_moderate_rcvbuf net.ipv4.udp_rmem_min net.ipv4.udp_wmem_min net.ipv4.tcp_fastopen net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_timestamps net.ipv4.tcp_tw_reuse net.ipv4.tcp_fin_timeout net.ipv4.tcp_retries2 net.ipv4.tcp_max_orphans net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_syncookies net.ipv4.tcp_notsent_lowat net.ipv4.tcp_sack net.ipv4.tcp_mtu_probing net.ipv4.tcp_rfc1337 net.ipv4.tcp_ecn net.ipv4.tcp_no_metrics_save net.ipv4.ip_local_port_range net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_keepalive_probes net.ipv4.icmp_echo_ignore_all net.ipv4.icmp_echo_ignore_broadcasts net.ipv4.icmp_ratelimit net.ipv4.icmp_msgs_per_sec net.ipv4.conf.all.accept_redirects net.ipv4.conf.default.accept_redirects net.ipv4.conf.all.send_redirects net.ipv4.conf.default.send_redirects net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter kernel.kptr_restrict kernel.dmesg_restrict net.ipv4.conf.all.log_martians net.ipv4.conf.default.log_martians net.netfilter.nf_conntrack_max net.netfilter.nf_conntrack_tcp_timeout_established net.netfilter.nf_conntrack_tcp_timeout_time_wait net.netfilter.nf_conntrack_tcp_timeout_close_wait net.netfilter.nf_conntrack_tcp_timeout_fin_wait net.netfilter.nf_conntrack_tcp_timeout_last_ack net.netfilter.nf_conntrack_udp_timeout net.netfilter.nf_conntrack_udp_timeout_stream vm.swappiness vm.overcommit_memory; do
                 sed -i "/^${key} /d" /etc/sysctl.conf 2>/dev/null
             done
             sed -i '/VPS 网络优化/d' /etc/sysctl.conf
@@ -232,47 +271,55 @@ _restore_all() {
 _optimize_all() {
     old_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo cubic)
 
-    # 0. 备份 + 安装依赖
+    # 0. 备份 + 安装依赖 + 硬件检测
     echo ""
-    _info "[0/8] 备份 + 安装依赖..."
+    _info "[0/8] 备份 + 安装依赖 + 硬件检测..."
     _backup_all
     _install_deps
+    _detect_hardware
     _success "OK"
 
     # 1. sysctl - 网络优化 + 安全加固
     echo ""
-    _info "[1/8] sysctl 参数 (38项)..."
+    _info "[1/8] sysctl 参数 (根据 ${CPU_CORES}核/${RAM_MB}MB 动态计算)..."
 
-    cat > /etc/sysctl.conf << 'SYSCTLEOF'
+    cat > /etc/sysctl.conf << SYSCTLEOF
 # VPS 网络优化 + 安全隐匿 - 整合方案
 # 仅保留对代理/隧道 VPS 真实有效的参数
+# 动态检测: ${CPU_CORES}核 CPU, ${RAM_MB}MB 内存
 
-# ═══ 文件系统 ═══
-fs.file-max = 6815744
-fs.nr_open = 6815744
+# ═══ 文件系统 (根据内存: ${RAM_MB}MB) ═══
+fs.file-max = ${FILE_MAX}
+fs.nr_open = ${FILE_MAX}
 
-# ═══ 连接队列 ═══
+# ═══ 连接队列 (根据CPU: ${CPU_CORES}核) ═══
 net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_abort_on_overflow = 0
-net.core.netdev_max_backlog = 65536
+net.core.netdev_max_backlog = ${NETDEV_BACKLOG}
+
+# ═══ 吞吐量优化 ═══
+net.core.busy_read = 50
+net.core.busy_poll = 50
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 6000
 
 # ═══ BBR 拥塞控制 ═══
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 
-# ═══ TCP 缓冲区 (64MB) ═══
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
+# ═══ TCP 缓冲区 (根据内存: ${RAM_MB}MB) ═══
+net.core.rmem_max = ${TCP_BUF_MAX}
+net.core.wmem_max = ${TCP_BUF_MAX}
 net.core.rmem_default = 2097152
 net.core.wmem_default = 2097152
-net.ipv4.tcp_rmem = 4096 87380 67108864
-net.ipv4.tcp_wmem = 4096 65536 67108864
+net.ipv4.tcp_rmem = ${TCP_BUF_RMEM}
+net.ipv4.tcp_wmem = ${TCP_BUF_WMEM}
 net.ipv4.tcp_moderate_rcvbuf = 1
 
 # ═══ UDP 缓冲区 ═══
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
+net.ipv4.udp_rmem_min = ${UDP_BUF_MIN}
+net.ipv4.udp_wmem_min = ${UDP_BUF_MIN}
 
 # ═══ TCP 连接优化 ═══
 net.ipv4.tcp_fastopen = 3
@@ -320,8 +367,8 @@ kernel.dmesg_restrict = 1
 net.ipv4.conf.all.log_martians = 1
 net.ipv4.conf.default.log_martians = 1
 
-# ═══ Conntrack 连接跟踪 ═══
-net.netfilter.nf_conntrack_max = 131072
+# ═══ Conntrack 连接跟踪 (根据内存: ${RAM_MB}MB) ═══
+net.netfilter.nf_conntrack_max = ${CONNTRACK_MAX}
 net.netfilter.nf_conntrack_tcp_timeout_established = 7200
 net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
 net.netfilter.nf_conntrack_tcp_timeout_close_wait = 60
@@ -338,6 +385,11 @@ SYSCTLEOF
     # 加载内核模块
     modprobe nf_conntrack 2>/dev/null || true
     modprobe tcp_bbr 2>/dev/null || true
+
+    # 网卡 TX 队列长度 (默认 1000，增大可减少高吞吐时丢包)
+    for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep -v lo); do
+        ip link set "$iface" txqueuelen 10000 2>/dev/null || true
+    done
 
     # 应用并统计结果
     sysctl_output=$(sysctl -p 2>&1)
