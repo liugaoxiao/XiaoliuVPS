@@ -102,8 +102,7 @@ _backup_all() {
     # limits.conf
     [ -f /etc/security/limits.conf ] && cp /etc/security/limits.conf "$BACKUP_DIR/limits.conf.bak"
 
-    # gai.conf
-    [ -f /etc/gai.conf ] && cp /etc/gai.conf "$BACKUP_DIR/gai.conf.bak"
+    # gai.conf 不再备份或修改：本脚本不改变系统地址族选择策略
 
     # nftables (保存我们创建的表的状态)
     nft list table inet vps_optimize > "$BACKUP_DIR/vps_optimize.nft.bak" 2>/dev/null || true
@@ -228,17 +227,14 @@ _restore_all() {
     systemctl daemon-reexec 2>/dev/null || true
     _success "systemd nofile 已清除"
 
-    # 5. 恢复 gai.conf
+    # 5. 清理旧的全局 IPv4 优先规则
     echo ""
-    _info "[5/7] 恢复 IPv4 优先解析 ..."
-    if [ -f "$BACKUP_DIR/gai.conf.bak" ]; then
-        cp "$BACKUP_DIR/gai.conf.bak" /etc/gai.conf
-        _success "已从备份恢复 gai.conf"
+    _info "[5/7] 清理全局 IPv4 优先 ..."
+    if [ -f /etc/gai.conf ]; then
+        sed -i '/^precedence ::ffff:0:0\/96  100$/d' /etc/gai.conf 2>/dev/null || true
+        _success "已移除脚本写入的 IPv4 优先规则（如存在）"
     else
-        if [ -f /etc/gai.conf ]; then
-            sed -i '/^precedence ::ffff:0:0\/96  100$/d' /etc/gai.conf
-            _success "已移除 IPv4 优先配置"
-        fi
+        _success "gai.conf 不存在，使用系统默认地址族策略"
     fi
 
     # 6. 恢复模块开机加载
@@ -443,15 +439,15 @@ EOF
     systemctl daemon-reexec 2>/dev/null || true
     _success "systemd: DefaultLimitNOFILE=1048576"
 
-    # 4. gai.conf
+    # 4. 地址族策略：不强制 IPv4 优先
     echo ""
-    _info "[4/8] IPv4 优先解析..."
+    _info "[4/8] 地址族策略 (不强制 IPv4 优先)..."
     if [ -f /etc/gai.conf ]; then
-        grep -q 'ffff:0:0' /etc/gai.conf 2>/dev/null || echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
+        sed -i '/^precedence ::ffff:0:0\/96  100$/d' /etc/gai.conf 2>/dev/null || true
+        _success "已移除全局 IPv4 优先，保留其他 gai.conf 配置"
     else
-        echo 'precedence ::ffff:0:0/96  100' > /etc/gai.conf
+        _success "gai.conf 不存在，使用系统默认地址族策略"
     fi
-    _success "OK"
 
     # 5. 防火墙规则 (MSS Clamp + DDoS + 隐匿)
     echo ""
