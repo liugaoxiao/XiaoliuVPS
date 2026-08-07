@@ -25,13 +25,13 @@ SSH_FILE=/etc/ssh/sshd_config.d/90-vps-optimize.conf
 NFT_FILE=/etc/nftables.d/vps-optimize.nft
 NFT_INCLUDE='# vps-optimize managed include'
 NFT_SERVICE_STATE="$BASELINE_DIR/nftables-service-enabled"
-SYN_RATE=${SYN_RATE:-2000}
-UDP_RATE=${UDP_RATE:-2000}
-SSH_RATE=${SSH_RATE:-20}
 
 _cleanup_tmp() { [ -n "${TMPDIR_WORK:-}" ] && rm -rf "$TMPDIR_WORK"; }
 trap _cleanup_tmp EXIT
-_require() { command -v "$1" >/dev/null 2>&1 || _die "Required command not found: $1"; }
+
+_require() {
+    command -v "$1" >/dev/null 2>&1 || _die "Required command not found: $1"
+}
 
 _detect_hardware() {
     CPU_CORES=$(nproc 2>/dev/null || echo 1)
@@ -43,6 +43,7 @@ _detect_hardware() {
     if [ "$RAM_MB" -ge 1536 ]; then TCP_BUF_MAX=67108864; UDP_BUF_MIN=16384; else TCP_BUF_MAX=33554432; UDP_BUF_MIN=8192; fi
     _info "Hardware: ${CPU_CORES} CPU cores, ${RAM_MB} MB RAM"
 }
+
 _capture_baseline() {
     mkdir -p "$BASELINE_DIR"
     [ -f "$BASELINE_DIR/created_at" ] && return 0
@@ -54,25 +55,48 @@ _capture_baseline() {
         sysctl -n "$key" 2>/dev/null >> "$BASELINE_DIR/runtime-sysctl" || echo >> "$BASELINE_DIR/runtime-sysctl"
     done
 }
-_write_atomic() { local target=$1 source=$2; mkdir -p "$(dirname "$target")"; install -m 0644 "$source" "${target}.new"; mv -f "${target}.new" "$target"; }
+
+_write_atomic() {
+    local target=$1 source=$2
+    mkdir -p "$(dirname "$target")"
+    install -m 0644 "$source" "${target}.new"
+    mv -f "${target}.new" "$target"
+}
+
 _capture_sysctl_values() {
-    local source=$1 state=$2 key ignored
+    local source=$1 state=$2
     : > "$state"
     while IFS='=' read -r key ignored; do
-        key=$(printf '%s' "$key" | tr -d ' '); [ -n "$key" ] || continue
-        printf '%s=' "$key" >> "$state"; sysctl -n "$key" 2>/dev/null >> "$state" || echo >> "$state"
+        key=$(printf '%s' "$key" | tr -d ' ')
+        [ -n "$key" ] || continue
+        printf '%s=' "$key" >> "$state"
+        sysctl -n "$key" 2>/dev/null >> "$state" || echo >> "$state"
     done < <(grep -E '^[a-zA-Z0-9_.]+[[:space:]]*=' "$source")
 }
-_restore_sysctl_values() { local state=$1 key value; [ -f "$state" ] || return 0; while IFS='=' read -r key value; do [ -n "$key" ] && [ -n "$value" ] && sysctl -w "$key=$value" >/dev/null 2>&1 || true; done < "$state"; }
-_capture_managed_sysctls() { local source=$1 state="$BASELINE_DIR/managed-runtime-sysctl"; [ -f "$state" ] || _capture_sysctl_values "$source" "$state"; }
+
+_restore_sysctl_values() {
+    local state=$1
+    [ -f "$state" ] || return 0
+    while IFS='=' read -r key value; do
+        [ -n "$key" ] && [ -n "$value" ] && sysctl -w "$key=$value" >/dev/null 2>&1 || true
+    done < "$state"
+}
+
+_capture_managed_sysctls() {
+    local source=$1
+    local state="$BASELINE_DIR/managed-runtime-sysctl"
+    [ -f "$state" ] || _capture_sysctl_values "$source" "$state"
+}
+
 _reload_ssh() {
     command -v systemctl >/dev/null 2>&1 || { _warn "systemctl is unavailable; SSH configuration was validated but not reloaded"; return 0; }
     if systemctl is-active --quiet ssh; then systemctl reload ssh
     elif systemctl is-active --quiet sshd; then systemctl reload sshd
     else _warn "SSH service is not active; configuration was validated but not reloaded"; fi
 }
+
 _apply_sysctl() {
-    local tmp="$TMPDIR_WORK/sysctl.conf" output
+    local tmp="$TMPDIR_WORK/sysctl.conf"
     cat > "$tmp" <<EOF
 # Managed by vps-optimize. Remove this file to stop persistence.
 fs.file-max = ${FILE_MAX}
@@ -117,12 +141,16 @@ net.netfilter.nf_conntrack_udp_timeout = 60
 net.netfilter.nf_conntrack_udp_timeout_stream = 180
 vm.swappiness = 10
 EOF
-    _capture_managed_sysctls "$tmp"; _capture_sysctl_values "$tmp" "$TMPDIR_WORK/sysctl.runtime.previous"
+    _capture_managed_sysctls "$tmp"
+    _capture_sysctl_values "$tmp" "$TMPDIR_WORK/sysctl.runtime.previous"
     [ -f "$SYSCTL_FILE" ] && cp "$SYSCTL_FILE" "$TMPDIR_WORK/sysctl.previous"
+    local output
     output=$(sysctl -p "$tmp" 2>&1) || { printf '%s\n' "$output" >&2; _restore_sysctl_values "$TMPDIR_WORK/sysctl.runtime.previous"; [ -f "$TMPDIR_WORK/sysctl.previous" ] && _write_atomic "$SYSCTL_FILE" "$TMPDIR_WORK/sysctl.previous" || rm -f "$SYSCTL_FILE"; _die "sysctl apply failed; previous runtime values and managed file restored"; }
     if printf '%s\n' "$output" | grep -qiE 'unknown key|cannot stat|permission denied'; then printf '%s\n' "$output" >&2; _restore_sysctl_values "$TMPDIR_WORK/sysctl.runtime.previous"; [ -f "$TMPDIR_WORK/sysctl.previous" ] && _write_atomic "$SYSCTL_FILE" "$TMPDIR_WORK/sysctl.previous" || rm -f "$SYSCTL_FILE"; _die "Unsupported sysctl key detected; previous runtime values and managed file restored"; fi
-    _write_atomic "$SYSCTL_FILE" "$tmp"; _success "sysctl applied from $SYSCTL_FILE"
+    _write_atomic "$SYSCTL_FILE" "$tmp"
+    _success "sysctl applied from $SYSCTL_FILE"
 }
+
 _apply_limits() {
     cat > "$TMPDIR_WORK/limits.conf" <<'EOF'
 # Managed by vps-optimize
@@ -132,13 +160,24 @@ root soft nofile 1048576
 root hard nofile 1048576
 EOF
     _write_atomic "$LIMITS_FILE" "$TMPDIR_WORK/limits.conf"
-    printf '[Manager]\nDefaultLimitNOFILE=1048576\n' > "$TMPDIR_WORK/systemd.conf"; _write_atomic "$SYSTEMD_FILE" "$TMPDIR_WORK/systemd.conf"
+    cat > "$TMPDIR_WORK/systemd.conf" <<'EOF'
+[Manager]
+DefaultLimitNOFILE=1048576
+EOF
+    _write_atomic "$SYSTEMD_FILE" "$TMPDIR_WORK/systemd.conf"
     if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reexec || _warn "systemd daemon-reexec failed; limits apply after next reboot"; else _warn "systemctl unavailable; systemd limits apply only where systemd is present"; fi
 }
+
 _apply_modules_and_queue() {
-    printf 'tcp_bbr\nnf_conntrack\n' > "$TMPDIR_WORK/modules.conf"; _write_atomic "$MODULE_FILE" "$TMPDIR_WORK/modules.conf"
-    modprobe tcp_bbr 2>/dev/null || true; sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr || _die "BBR is unavailable in this kernel"
-    modprobe nf_conntrack 2>/dev/null || _warn "nf_conntrack module cannot be loaded"; _require ip
+    cat > "$TMPDIR_WORK/modules.conf" <<'EOF'
+tcp_bbr
+nf_conntrack
+EOF
+    _write_atomic "$MODULE_FILE" "$TMPDIR_WORK/modules.conf"
+    modprobe tcp_bbr 2>/dev/null || true
+    sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr || _die "BBR is unavailable in this kernel"
+    modprobe nf_conntrack 2>/dev/null || _warn "nf_conntrack module cannot be loaded"
+    _require ip
     while IFS= read -r iface; do ip link set "$iface" txqueuelen 10000 || _warn "Cannot set txqueuelen on $iface"; done < <(ip -o link show | awk -F': ' '$2 != "lo" {print $2}' | sed 's/@.*//')
     cat > "$TMPDIR_WORK/udev.rules" <<'EOF'
 ACTION=="add", SUBSYSTEM=="net", KERNEL!="lo", RUN+="/sbin/ip link set $name txqueuelen 10000"
@@ -146,8 +185,10 @@ EOF
     _write_atomic "$UDEV_FILE" "$TMPDIR_WORK/udev.rules"
     if command -v udevadm >/dev/null 2>&1; then udevadm control --reload-rules || _warn "udev reload failed; queue persistence applies after reboot"; else _warn "udevadm unavailable; queue persistence depends on the host network manager"; fi
 }
+
 _apply_ssh() {
-    _require sshd; [ -d /etc/ssh/sshd_config.d ] || { _warn "sshd_config.d is unavailable; SSH configuration skipped"; return 0; }
+    _require sshd
+    [ -d /etc/ssh/sshd_config.d ] || { _warn "sshd_config.d is unavailable; SSH configuration skipped"; return 0; }
     cat > "$TMPDIR_WORK/ssh.conf" <<'EOF'
 # Managed by vps-optimize
 PermitEmptyPasswords no
@@ -155,48 +196,69 @@ MaxAuthTries 5
 X11Forwarding no
 Banner /dev/null
 EOF
-    [ -f "$SSH_FILE" ] && cp "$SSH_FILE" "$TMPDIR_WORK/ssh.previous"; _write_atomic "$SSH_FILE" "$TMPDIR_WORK/ssh.conf"
+    [ -f "$SSH_FILE" ] && cp "$SSH_FILE" "$TMPDIR_WORK/ssh.previous"
+    _write_atomic "$SSH_FILE" "$TMPDIR_WORK/ssh.conf"
     sshd -t -f /etc/ssh/sshd_config || { [ -f "$TMPDIR_WORK/ssh.previous" ] && _write_atomic "$SSH_FILE" "$TMPDIR_WORK/ssh.previous" || rm -f "$SSH_FILE"; _die "sshd validation failed; previous managed SSH file restored"; }
-    local effective setting; effective=$(sshd -T -f /etc/ssh/sshd_config) || { [ -f "$TMPDIR_WORK/ssh.previous" ] && _write_atomic "$SSH_FILE" "$TMPDIR_WORK/ssh.previous" || rm -f "$SSH_FILE"; _die "sshd effective configuration could not be read"; }
-    for setting in 'permitemptypasswords no' 'maxauthtries 5' 'x11forwarding no' 'banner /dev/null'; do printf '%s\n' "$effective" | grep -qxF "$setting" || { [ -f "$TMPDIR_WORK/ssh.previous" ] && _write_atomic "$SSH_FILE" "$TMPDIR_WORK/ssh.previous" || rm -f "$SSH_FILE"; _die "SSH setting not effective: $setting"; }; done
+    local effective
+    effective=$(sshd -T -f /etc/ssh/sshd_config) || { [ -f "$TMPDIR_WORK/ssh.previous" ] && _write_atomic "$SSH_FILE" "$TMPDIR_WORK/ssh.previous" || rm -f "$SSH_FILE"; _die "sshd effective configuration could not be read"; }
+    for setting in 'permitemptypasswords no' 'maxauthtries 5' 'x11forwarding no' 'banner /dev/null'; do
+        printf '%s\n' "$effective" | grep -qxF "$setting" || { [ -f "$TMPDIR_WORK/ssh.previous" ] && _write_atomic "$SSH_FILE" "$TMPDIR_WORK/ssh.previous" || rm -f "$SSH_FILE"; _die "SSH setting not effective: $setting"; }
+    done
     _reload_ssh || { [ -f "$TMPDIR_WORK/ssh.previous" ] && _write_atomic "$SSH_FILE" "$TMPDIR_WORK/ssh.previous" || rm -f "$SSH_FILE"; _die "SSH reload failed; previous managed SSH file restored"; }
     _success "SSH configuration validated and applied"
 }
+
 _apply_nftables() {
     command -v nft >/dev/null 2>&1 || { _warn "nft is unavailable; firewall protection skipped"; return 0; }
-    if command -v systemctl >/dev/null 2>&1 && { systemctl is-active --quiet ufw || systemctl is-active --quiet firewalld; }; then _warn "UFW or firewalld is active; firewall changes skipped to avoid conflicting control planes"; return 0; fi
-    if nft list table inet vps_optimize >/dev/null 2>&1; then nft list table inet vps_optimize | grep -qF 'vps-optimize invalid' || _die "Existing inet vps_optimize table is not owned by this script"; fi
-    if [ ! -f "$NFT_SERVICE_STATE" ] && command -v systemctl >/dev/null 2>&1; then systemctl is-enabled --quiet nftables && echo enabled > "$NFT_SERVICE_STATE" || echo disabled > "$NFT_SERVICE_STATE"; fi
-    cat > "$TMPDIR_WORK/nft.conf" <<EOF
+    if command -v systemctl >/dev/null 2>&1 && { systemctl is-active --quiet ufw || systemctl is-active --quiet firewalld; }; then
+        _warn "UFW or firewalld is active; firewall changes skipped to avoid conflicting control planes"
+        return 0
+    fi
+    if nft list table inet vps_optimize >/dev/null 2>&1; then
+        nft list table inet vps_optimize | grep -qF 'vps-optimize invalid' || _die "Existing inet vps_optimize table is not owned by this script"
+    fi
+    if [ ! -f "$NFT_SERVICE_STATE" ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl is-enabled --quiet nftables && echo enabled > "$NFT_SERVICE_STATE" || echo disabled > "$NFT_SERVICE_STATE"
+    fi
+    cat > "$TMPDIR_WORK/nft.conf" <<'EOF'
 # Managed by vps-optimize. This chain only drops invalid, malformed, or excessive traffic.
 table inet vps_optimize {
   chain input_guard {
     type filter hook input priority filter - 5; policy accept;
     ct state invalid drop comment "vps-optimize invalid"
-    tcp flags syn,fin syn,fin drop comment "vps-optimize xmas"
-    tcp flags syn,rst syn,rst drop comment "vps-optimize syn-rst"
-    ip protocol icmp icmp type echo-request limit rate over 5/second burst 5 packets drop comment "vps-optimize icmp4-rate"
-    meta nfproto ipv6 icmpv6 type echo-request limit rate over 5/second burst 5 packets drop comment "vps-optimize icmp6-rate"
-    meta nfproto ipv4 tcp flags syn tcp dport != 22 meter syn_rate4 { ip saddr timeout 10s limit rate over ${SYN_RATE}/second burst 400 packets } drop comment "vps-optimize syn4-rate"
-    meta nfproto ipv6 tcp flags syn tcp dport != 22 meter syn_rate6 { ip6 saddr timeout 10s limit rate over ${SYN_RATE}/second burst 400 packets } drop comment "vps-optimize syn6-rate"
-    meta nfproto ipv4 tcp dport 22 ct state new meter ssh_rate4 { ip saddr timeout 60s limit rate over ${SSH_RATE}/minute burst 20 packets } drop comment "vps-optimize ssh4-rate"
-    meta nfproto ipv6 tcp dport 22 ct state new meter ssh_rate6 { ip6 saddr timeout 60s limit rate over ${SSH_RATE}/minute burst 20 packets } drop comment "vps-optimize ssh6-rate"
-    meta nfproto ipv4 udp meter udp_rate4 { ip saddr timeout 10s limit rate over ${UDP_RATE}/second burst 400 packets } drop comment "vps-optimize udp4-rate"
-    meta nfproto ipv6 udp meter udp_rate6 { ip6 saddr timeout 10s limit rate over ${UDP_RATE}/second burst 400 packets } drop comment "vps-optimize udp6-rate"
+    tcp flags & (syn | fin) == (syn | fin) drop comment "vps-optimize syn-fin"
+    tcp flags & (syn | rst) == (syn | rst) drop comment "vps-optimize syn-rst"
+    ip protocol icmp icmp type echo-request limit rate over 20/second burst 20 packets drop comment "vps-optimize icmp4-rate"
+    meta nfproto ipv6 icmpv6 type echo-request limit rate over 20/second burst 20 packets drop comment "vps-optimize icmp6-rate"
+    # Per-source meters are deliberately omitted: older nftables releases reject
+    # their syntax and global UDP/SYN limits can disrupt proxy and QUIC traffic.
   }
 }
 EOF
     nft -c -f "$TMPDIR_WORK/nft.conf" || _die "nftables syntax validation failed; firewall unchanged"
     nft list table inet vps_optimize > "$TMPDIR_WORK/previous.nft" 2>/dev/null || :
-    if [ ! -e "$BASELINE_DIR/vps_optimize.nft" ] && [ ! -e "$BASELINE_DIR/vps_optimize.none" ]; then if [ -s "$TMPDIR_WORK/previous.nft" ]; then cp "$TMPDIR_WORK/previous.nft" "$BASELINE_DIR/vps_optimize.nft"; else : > "$BASELINE_DIR/vps_optimize.none"; fi; fi
+    if [ ! -e "$BASELINE_DIR/vps_optimize.nft" ] && [ ! -e "$BASELINE_DIR/vps_optimize.none" ]; then
+        if [ -s "$TMPDIR_WORK/previous.nft" ]; then cp "$TMPDIR_WORK/previous.nft" "$BASELINE_DIR/vps_optimize.nft"; else : > "$BASELINE_DIR/vps_optimize.none"; fi
+    fi
     nft delete table inet vps_optimize 2>/dev/null || true
-    if ! nft -f "$TMPDIR_WORK/nft.conf"; then [ -s "$TMPDIR_WORK/previous.nft" ] && nft -f "$TMPDIR_WORK/previous.nft" 2>/dev/null || _warn "Previous firewall table could not be restored"; _die "nftables load failed; previous table restore was attempted"; fi
+    if ! nft -f "$TMPDIR_WORK/nft.conf"; then
+        if [ -s "$TMPDIR_WORK/previous.nft" ]; then nft -f "$TMPDIR_WORK/previous.nft" 2>/dev/null || _warn "Previous firewall table could not be restored"; fi
+        _die "nftables load failed; previous table restore was attempted"
+    fi
     _write_atomic "$NFT_FILE" "$TMPDIR_WORK/nft.conf"
-    if [ ! -f /etc/nftables.conf ]; then printf '%s\ninclude "%s"\n' "$NFT_INCLUDE" "$NFT_FILE" > "$TMPDIR_WORK/nftables.conf"; _write_atomic /etc/nftables.conf "$TMPDIR_WORK/nftables.conf"
-    elif ! grep -qF "$NFT_INCLUDE" /etc/nftables.conf; then cp /etc/nftables.conf "$TMPDIR_WORK/nftables.conf"; printf '\n%s\ninclude "%s"\n' "$NFT_INCLUDE" "$NFT_FILE" >> "$TMPDIR_WORK/nftables.conf"; nft -c -f "$TMPDIR_WORK/nftables.conf" || _die "nftables persistence file validation failed"; _write_atomic /etc/nftables.conf "$TMPDIR_WORK/nftables.conf"; fi
+    if [ ! -f /etc/nftables.conf ]; then
+        printf '%s\ninclude "%s"\n' "$NFT_INCLUDE" "$NFT_FILE" > "$TMPDIR_WORK/nftables.conf"
+        _write_atomic /etc/nftables.conf "$TMPDIR_WORK/nftables.conf"
+    elif ! grep -qF "$NFT_INCLUDE" /etc/nftables.conf; then
+        cp /etc/nftables.conf "$TMPDIR_WORK/nftables.conf"
+        printf '\n%s\ninclude "%s"\n' "$NFT_INCLUDE" "$NFT_FILE" >> "$TMPDIR_WORK/nftables.conf"
+        nft -c -f "$TMPDIR_WORK/nftables.conf" || _die "nftables persistence file validation failed"
+        _write_atomic /etc/nftables.conf "$TMPDIR_WORK/nftables.conf"
+    fi
     if command -v systemctl >/dev/null 2>&1; then systemctl enable nftables >/dev/null 2>&1 || _warn "nftables service could not be enabled; verify persistence on this distribution"; else _warn "systemctl unavailable; verify nftables persistence manually"; fi
     _success "nftables syntax checked and loaded"
 }
+
 _verify() {
     local failed=0
     [ -f "$SYSCTL_FILE" ] || { _error "Missing managed sysctl file"; failed=1; }
@@ -205,35 +267,60 @@ _verify() {
     [ -f "$LIMITS_FILE" ] && [ -f "$SYSTEMD_FILE" ] || { _error "nofile configuration is incomplete"; failed=1; }
     if command -v nft >/dev/null 2>&1 && [ -f "$NFT_FILE" ]; then nft list table inet vps_optimize >/dev/null 2>&1 || { _error "Firewall table is missing"; failed=1; }; fi
     if [ -f "$SSH_FILE" ]; then sshd -t -f /etc/ssh/sshd_config || { _error "SSH configuration is invalid"; failed=1; }; fi
-    [ "$failed" -eq 0 ] || return 1; _success "Verification passed: managed files, BBR/fq, optional firewall, and SSH"
+    [ "$failed" -eq 0 ] || return 1
+    _success "Verification passed: managed files, BBR/fq, optional firewall, and SSH"
 }
+
 _optimize_all() {
-    TMPDIR_WORK=$(mktemp -d); _require sysctl; _require awk; _require sed; _require grep
-    _capture_baseline; _detect_hardware; modprobe tcp_bbr 2>/dev/null || true; modprobe nf_conntrack 2>/dev/null || true
-    _apply_sysctl; _apply_limits; _apply_modules_and_queue
+    TMPDIR_WORK=$(mktemp -d)
+    _require sysctl; _require awk; _require sed; _require grep
+    _capture_baseline
+    _detect_hardware
+    modprobe tcp_bbr 2>/dev/null || true
+    modprobe nf_conntrack 2>/dev/null || true
+    _apply_sysctl
+    _apply_limits
+    _apply_modules_and_queue
     _info "Address-family policy unchanged; configure IPv6-only egress in the proxy core"
-    _apply_ssh; _apply_nftables; _verify
+    _apply_ssh
+    _apply_nftables
+    _verify
 }
+
 _restore_all() {
     echo "This removes only files managed by this script and restores captured runtime values."
-    read -r -p "Confirm restore? (y/N): " confirm < /dev/tty; [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled"; return; }
+    read -r -p "Confirm restore? (y/N): " confirm < /dev/tty
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled"; return; }
     rm -f "$SYSCTL_FILE" "$LIMITS_FILE" "$SYSTEMD_FILE" "$MODULE_FILE" "$UDEV_FILE" "$SSH_FILE" "$NFT_FILE"
-    if command -v nft >/dev/null 2>&1; then nft delete table inet vps_optimize 2>/dev/null || true; [ -s "$BASELINE_DIR/vps_optimize.nft" ] && nft -f "$BASELINE_DIR/vps_optimize.nft" || true; fi
-    if [ -f /etc/nftables.conf ]; then sed -i "\\|$NFT_INCLUDE|d;\\|$NFT_FILE|d" /etc/nftables.conf; fi
-    if [ -s "$BASELINE_DIR/vps_optimize.nft" ]; then _write_atomic "$NFT_FILE" "$BASELINE_DIR/vps_optimize.nft"; [ -f /etc/nftables.conf ] && printf '\n%s\ninclude "%s"\n' "$NFT_INCLUDE" "$NFT_FILE" >> /etc/nftables.conf; fi
-    if command -v systemctl >/dev/null 2>&1 && [ -f "$NFT_SERVICE_STATE" ] && [ "$(cat "$NFT_SERVICE_STATE")" = disabled ]; then systemctl disable nftables >/dev/null 2>&1 || _warn "Could not restore disabled nftables service state"; fi
-    sysctl --system >/dev/null 2>&1 || _warn "sysctl --system reported unsupported distribution keys"; _restore_sysctl_values "$BASELINE_DIR/managed-runtime-sysctl"
-    command -v systemctl >/dev/null 2>&1 && systemctl daemon-reexec || true; command -v udevadm >/dev/null 2>&1 && udevadm control --reload-rules || true
+    if command -v nft >/dev/null 2>&1; then
+        nft delete table inet vps_optimize 2>/dev/null || true
+        if [ -s "$BASELINE_DIR/vps_optimize.nft" ]; then nft -f "$BASELINE_DIR/vps_optimize.nft" || _warn "Could not restore the pre-existing vps_optimize table"; fi
+    fi
+    if [ -f /etc/nftables.conf ]; then sed -i "\|$NFT_INCLUDE|d;\|$NFT_FILE|d" /etc/nftables.conf; fi
+    if [ -s "$BASELINE_DIR/vps_optimize.nft" ]; then
+        _write_atomic "$NFT_FILE" "$BASELINE_DIR/vps_optimize.nft"
+        if [ -f /etc/nftables.conf ]; then printf '\n%s\ninclude "%s"\n' "$NFT_INCLUDE" "$NFT_FILE" >> /etc/nftables.conf; fi
+    fi
+    if command -v systemctl >/dev/null 2>&1 && [ -f "$NFT_SERVICE_STATE" ]; then
+        if [ "$(cat "$NFT_SERVICE_STATE")" = disabled ]; then systemctl disable nftables >/dev/null 2>&1 || _warn "Could not restore disabled nftables service state"; fi
+    fi
+    sysctl --system >/dev/null 2>&1 || _warn "sysctl --system reported unsupported distribution keys"
+    _restore_sysctl_values "$BASELINE_DIR/managed-runtime-sysctl"
+    command -v systemctl >/dev/null 2>&1 && systemctl daemon-reexec || true
+    command -v udevadm >/dev/null 2>&1 && udevadm control --reload-rules || true
     if [ -f /etc/ssh/sshd_config ]; then sshd -t -f /etc/ssh/sshd_config && _reload_ssh || _warn "SSH reload skipped because validation failed"; fi
     _success "Managed files removed. Baseline retained at $BASELINE_DIR"
 }
+
 clear
-echo -e "${CYAN}VPS Network Optimization and Safe Restore${NC}"
-echo "1) Apply managed optimization"; echo "2) Restore managed changes"; echo "3) Reboot VPS"
-read -r -p "Select [1/2/3]: " choice < /dev/tty
+echo -e "${CYAN}VPS 网络优化与安全还原${NC}"
+echo "1) 应用优化配置"
+echo "2) 还原本脚本的配置"
+echo "3) 重启 VPS"
+read -r -p "请选择 [1/2/3]: " choice < /dev/tty
 case "$choice" in
   1) _optimize_all ;;
   2) _restore_all ;;
-  3) read -r -p "Confirm reboot? (y/N): " yes < /dev/tty; [[ "$yes" =~ ^[Yy]$ ]] && { _info "Rebooting in 3 seconds"; sleep 3; reboot; } ;;
-  *) _die "Invalid option" ;;
+  3) read -r -p "确认重启？(y/N): " yes < /dev/tty; [[ "$yes" =~ ^[Yy]$ ]] && { _info "3 秒后重启"; sleep 3; reboot; } ;;
+  *) _die "无效选项" ;;
 esac
