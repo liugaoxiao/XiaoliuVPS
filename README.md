@@ -109,3 +109,7 @@ x6
 
 - [`singbox.sh`](./singbox.sh)：sing-box 节点管理脚本。
 - [`optimize.sh`](./optimize.sh)：动态网络优化脚本。
+
+## 参考项目
+
+网络优化思路参考 [Wyatt323/Shell](https://github.com/Wyatt323/Shell)、[sanmussh/vps-netpilot](https://github.com/sanmussh/vps-netpilot) 和 [kejilion/sh](https://github.com/kejilion/sh)。本项目按 sing-box 节点场景重新筛选、整合与实现。
