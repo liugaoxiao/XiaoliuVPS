@@ -341,7 +341,7 @@ SYSCTLEOF
 
     # 应用并统计结果
     sysctl_output=$(sysctl -p 2>&1)
-    sysctl_applied=$(echo "$sysctl_output" | grep -c ' = ' || true)
+    sysctl_applied=$(echo "$sysctl_output" | grep -c '^[a-z].* = ' || true)
     sysctl_skipped=$(echo "$sysctl_output" | grep -ci 'unknown key\|No such file\|permission denied' || true)
     if [ "$sysctl_skipped" -gt 0 ]; then
         _warn "${sysctl_applied} 项生效, ${sysctl_skipped} 项跳过(内核不支持)"
