@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 基础路径定义
-export SCRIPT_VERSION="22"
+export SCRIPT_VERSION="25"
 export DEFAULT_SNI="www.amd.com"
 export WS_EARLY_DATA_SIZE="2560"
 export WS_EARLY_DATA_HEADER="Sec-WebSocket-Protocol"
@@ -4948,7 +4948,7 @@ _update_script() {
     cache_bust=$(date +%s)
     main_script_url="${SCRIPT_UPDATE_URL}?v=${cache_bust}"
     
-    if wget -qO "$temp_script_path" "$main_script_url"; then
+    if { command -v wget >/dev/null 2>&1 && wget -qO "$temp_script_path" "$main_script_url"; } || { command -v curl >/dev/null 2>&1 && curl -fsSL --connect-timeout 10 -o "$temp_script_path" "$main_script_url"; }; then
         if [ ! -s "$temp_script_path" ]; then
             _error "主脚本下载失败或文件为空！"
             rm -f "$temp_script_path"
@@ -4963,6 +4963,11 @@ _update_script() {
         fi
         if ! bash -n "$temp_script_path" 2>/dev/null; then
             _error "下载的新脚本未通过 Bash 语法检查，已拒绝覆盖本地脚本。"
+            rm -f "$temp_script_path"
+            return 1
+        fi
+        if [[ "$SCRIPT_VERSION" =~ ^[0-9]+$ && "$downloaded_version" =~ ^[0-9]+$ ]] && (( 10#$downloaded_version < 10#$SCRIPT_VERSION )); then
+            _error "已拒绝版本回退：本地 v${SCRIPT_VERSION} 高于仓库 v${downloaded_version}。请先确认 GitHub 上传完成。"
             rm -f "$temp_script_path"
             return 1
         fi
