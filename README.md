@@ -5,7 +5,7 @@
 项目包含：
 
 - `singbox.sh`：节点创建、配置管理、服务管理、订阅信息和脚本更新。
-- `optimize.sh`：基于实际 CPU 和内存的 BBR/FQ 网络优化。
+- `optimize.sh`：基于实际 CPU 和内存的 BBR/FQ 网络优化，支持预览、状态、健康检查和恢复。
 
 ## 快速安装
 
@@ -25,7 +25,7 @@ x6
 ## 主菜单
 
 - `13`：从本仓库更新 `singbox.sh`。
-- `20`：打开动态网络优化工具。
+- `20`：打开动态网络优化工具（v26 支持预览、应用、状态、健康检查和恢复）。
 - 节点管理：创建、删除、查看和重启 sing-box 节点。
 
 更新主脚本：
@@ -39,7 +39,8 @@ x6
 
 ```bash
 x6
-# 选择 20，再选择 1
+# 选择 20
+# 1 预览方案；2 应用优化；3 查看状态；4 健康检查；5 恢复
 ```
 
 ## 动态网络优化
@@ -52,7 +53,7 @@ x6
 | 512MB 至小于 1GB | 32MB |
 | 1GB 及以上 | 64MB |
 
-根据 CPU 核数还会调整网络设备接收队列；2 核及以上且网卡支持时，尝试启用 RPS/RFS 多核收包分发。
+根据 CPU 核数和实际 RX 队列自适应处理 RPS/RFS：单核关闭；多核且网卡队列已足够时依赖现有多队列，避免重复软件分发；只有 RX 队列少于 CPU 核数时才尝试启用 RPS/RFS。
 
 包含的网络参数和功能：
 
@@ -62,6 +63,10 @@ x6
 - TCP keepalive、`tcp_retries2`、`tcp_notsent_lowat` 等连接稳定性参数。
 - 内核支持时启用动态 conntrack 容量。
 - 文件句柄上限和 BBR 模块开机加载。
+- RPS/RFS 按 CPU、RX 队列数量动态决定，避免在已有多队列网卡上重复分发。
+- 支持预览模式，不写入系统配置即可查看动态方案。
+- 支持状态查看和网络健康检查（TCP、网卡、Softnet、Conntrack）。
+- 操作日志记录到 `/var/log/xiaoliu-vps-optimize.log`。
 - sysctl 应用失败时恢复运行时参数和本脚本上一次的配置文件。
 
 普通公网 VPS 和提供商 NAT VPS 使用同一套优化逻辑。NAT VPS 仍按普通 VPS 创建节点，网络优化不会修改其端口映射或提供商网络策略。
@@ -92,7 +97,7 @@ Reality、TLS、Hysteria2 TLS 和可选端口跳跃等协议层配置由 `singbo
 
 ```bash
 x6
-# 选择 20，再选择 3
+# 选择 20，再选择 5
 ```
 
 这会删除本工具管理的持久化文件并尝试重载系统配置，同时恢复脚本保存的 RPS/RFS 网卡队列值。已有的其他 sysctl、节点配置和防火墙规则不会由恢复菜单删除。
@@ -112,4 +117,4 @@ x6
 
 ## 参考项目
 
-网络优化思路参考 [Wyatt323/Shell](https://github.com/Wyatt323/Shell)、[sanmussh/vps-netpilot](https://github.com/sanmussh/vps-netpilot) 和 [kejilion/sh](https://github.com/kejilion/sh)。本项目按 sing-box 节点场景重新筛选、整合与实现。
+网络优化思路参考 [Wyatt323/Shell](https://github.com/Wyatt323/Shell)、[sanmussh/vps-netpilot](https://github.com/sanmussh/vps-netpilot)、[kejilion/sh](https://github.com/kejilion/sh)、[jerry048/Dedicated-Seedbox](https://github.com/jerry048/Dedicated-Seedbox)、[KnowSky404/FlareTuner](https://github.com/KnowSky404/FlareTuner) 和 [sh13y/nettune](https://github.com/sh13y/nettune)。本项目按 sing-box 节点场景重新筛选、整合与实现，不默认加入换内核、改 DNS、CAKE、MSS Clamp 或防火墙规则。
