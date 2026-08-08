@@ -35,6 +35,42 @@ _warn() { echo -e "${YELLOW}[注意] $1${NC}" >&2; }
 _warning() { _warn "$1"; } # 别名兼容
 _error() { echo -e "${RED}[错误] $1${NC}" >&2; }
 
+# VLESS-Reality 常用伪装 SNI；默认保持 www.amd.com，兼容已有使用习惯。
+_prompt_reality_sni() {
+    local choice custom
+    echo "请选择 VLESS-Reality 伪装域名/SNI："
+    echo "  1) www.amd.com (默认)"
+    echo "  2) www.microsoft.com"
+    echo "  3) www.apple.com"
+    echo "  4) www.mozilla.org"
+    echo "  5) www.cloudflare.com"
+    echo "  6) www.lovelive-anime.jp"
+    echo "  7) www.speedtest.org"
+    echo "  8) swdist.apple.com"
+    echo "  9) 自定义域名"
+    read -r -p "请选择 [1-9]，默认 1: " choice
+    case "${choice:-1}" in
+        1) REPLY="www.amd.com" ;;
+        2) REPLY="www.microsoft.com" ;;
+        3) REPLY="www.apple.com" ;;
+        4) REPLY="www.mozilla.org" ;;
+        5) REPLY="www.cloudflare.com" ;;
+        6) REPLY="www.lovelive-anime.jp" ;;
+        7) REPLY="www.speedtest.org" ;;
+        8) REPLY="swdist.apple.com" ;;
+        9)
+            read -r -p "请输入自定义伪装域名 (默认: ${DEFAULT_SNI}): " custom
+            REPLY=$(printf '%s' "${custom:-$DEFAULT_SNI}" | xargs)
+            [ -n "$REPLY" ] || REPLY="$DEFAULT_SNI"
+            ;;
+        *)
+            _warn "无效选项，使用默认 SNI: ${DEFAULT_SNI}"
+            REPLY="$DEFAULT_SNI"
+            ;;
+    esac
+    _info "已选择 VLESS-Reality SNI: ${REPLY}"
+}
+
 # 检查 root 权限
 _check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -3462,8 +3498,8 @@ _add_vless_reality() {
     else
         read -p "请输入服务器IP地址 (默认: ${server_ip}): " custom_ip
         node_ip=${custom_ip:-$server_ip}
-        read -p "请输入伪装域名 (默认: www.amd.com): " camouflage_domain
-        server_name=${camouflage_domain:-"www.amd.com"}
+        _prompt_reality_sni
+        server_name="$REPLY"
         while true; do
             read -p "请输入监听端口: " port
             [[ -z "$port" ]] && _error "端口不能为空" && continue
